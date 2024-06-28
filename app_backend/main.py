@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field, root_validator, ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
 from enum import Enum
@@ -74,43 +74,37 @@ async def get_feeds_list():
 
 @app.post("/feeds/", status_code=status.HTTP_201_CREATED)
 async def create_feed(feed: FeedRequest):
-    # Validate that the feed name is unique
     if await feed_name_exists(db, feed.name):
         raise HTTPException(status_code=409, detail="Feed name already exists.")
     
-    # Validate feed types
     if feed.feed_type == FeedType.BASE_FEED:
-        if not validate_rss_feed(feed.url):
-            raise HTTPException(status_code=400, detail="Please provide a valid rss url.")
+        print("Not implemented yet!") # TODO
+        # if not validate_rss_feed(feed.url):
+        #     raise HTTPException(status_code=400, detail="Please provide a valid rss url.")
     else:
         for feed_name in feed.parent_feeds:
-            parent_id = await feed_name_exists(db, feed_name)
+            parent_id = await get_feed_id_by_name(db, feed_name)
             if not parent_id:
                 raise HTTPException(status_code=400, detail=f"Parent feed does not exists: {feed_name}")
             feed.parent_ids.append(parent_id)
-
-    # Add feed to the database
-    await db.feeds.insert_one(feed.to_db())
+    
+    await insert_feed(db, feed.to_db())
     return f"Feed added: {feed.name}"
 
 
 @app.get("/feeds/{feed_name}")
 async def get_feed(feed_name: str):
-    # Check if the feed exists
-    feed = await get_feed_from_db(db, feed_name)
+    feed = await get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
     
-    # Determine the type of the feed and return relevant information
     if "url" in feed:
-        # This is a BASE_FEED
         response = {
             "name": feed["name"],
             "url": feed["url"]
         }
     else:
-        # This is a DERIVED_FEED
-        parent_feeds = [await db.feeds.find_one({"_id": parent_id}, {"_id": 0, "name": 1}) for parent_id in feed["parent_ids"]]
+        parent_feeds = [await get_feed_by_name(db, parent_id) for parent_id in feed["parent_ids"]]
         parent_feeds_names = [parent["name"] for parent in parent_feeds]
         response = {
             "name": feed["name"],
@@ -122,17 +116,14 @@ async def get_feed(feed_name: str):
 
 @app.delete("/feeds/{feed_name}")
 async def delete_feed(feed_name: str):
-    # Check if the feed exists
-    feed_id = await feed_name_exists(db, feed_name)
+    feed_id = await get_feed_id_by_name(db, feed_name)
     if not feed_id:
         raise HTTPException(status_code=400, detail=f"Feed does not exist: {feed_name}")
-
-    # Ensure the feed isn't a parent feed for any other feeds
+    
     child_feed = await db.feeds.find_one({"parent_ids": feed_id})
     if child_feed:
         raise HTTPException(status_code=400, detail=f"Feed '{feed_name}' is a parent to other feeds and cannot be deleted.")
-
-    # Delete the feed
+    
     await db.feeds.delete_one({"_id": feed_id})
     return f"Feed deleted: {feed_name}"
 
@@ -140,7 +131,7 @@ async def delete_feed(feed_name: str):
 @app.get("/feeds/{feed_name}/filters/")
 async def get_filters(feed_name: str):
     # Check if the feed exists
-    feed = await get_feed_from_db(db, feed_name)
+    feed = await get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
     
@@ -152,7 +143,7 @@ async def get_filters(feed_name: str):
     return {"filters": feed.get("filters", [])}
 
 
-@app.put("/feeds/{feed_name}/filters/")
+@app.post("/feeds/{feed_name}/filters/")
 async def update_filters(feed_name: str, filters: Filters):
     # Check if the feed exists
     feed_id = await feed_name_exists(db, feed_name)
@@ -204,3 +195,23 @@ def unimplemented_endpoint(feed_name: str):
 @app.get("/feeds/{feed_name}/json/")
 def unimplemented_endpoint(feed_name: str):
     raise HTTPException(status_code=501,detail="This endpoint is not implemented yet.")
+
+@app.post("/update-feeds/")
+async def scan_for_new_posts(background_tasks: BackgroundTasks):
+    async def scan_task():
+        base_feeds = await get_base_feeds(db)
+        for feed in base_feeds:
+            feed_collection = f"feed_{feed['_id']}"
+            existing_guids = await get_existing_guids(db, feed_collection)
+            new_posts = []
+            
+            posts = fetch_feed_posts(feed["url"])
+            for post in posts:
+                if post["guid"] not in existing_guids:
+                    new_posts.append(post)
+            
+            if new_posts:
+                await insert_new_posts(db, feed_collection, new_posts)
+
+    background_tasks.add_task(scan_task)
+    return {"message": "Scanning for new posts started in the background"}
