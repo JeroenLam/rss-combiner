@@ -1,9 +1,11 @@
 from typing import Optional, List, Union
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, root_validator, ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
 from enum import Enum
 import os
+from feedgen.feed import FeedGenerator
 from utils import *
 from bson import json_util
 
@@ -244,56 +246,30 @@ async def remove_parent(feed_name: str, derivation_details: List[DerivationDetai
     return {"message": f"Derivation details removed for feed: {feed_name}"}
 
 @app.get("/feeds/{feed_name}/rss/")
-def unimplemented_endpoint(feed_name: str):
-    raise HTTPException(status_code=501,detail="This endpoint is not implemented yet.")
+async def get_feed_rss(feed_name: str, limit: int = 20):
+    all_posts = await fetch_processed_posts(feed_name, db, limit)
+
+    # Generate RSS feed using feedgen
+    fg = FeedGenerator()
+    fg.title(feed_name)
+    fg.link(href=f"/feeds/{feed_name}/rss/")
+    fg.description(f"RSS feed for {feed_name}")
+
+    for post in all_posts:
+        fe = fg.add_entry()
+        fe.title(post.get("title"))
+        fe.link(href=post.get("link"))
+        fe.description(post.get("description"))
+        fe.guid(post.get("guid"))
+        fe.pubDate(post.get("published"))
+        fe.source(post.get("feed"))
+
+    rss_feed = fg.rss_str(pretty=True)
+    return Response(content=rss_feed, media_type="application/rss+xml")
 
 @app.get("/feeds/{feed_name}/json/")
 async def get_feed_json(feed_name: str, limit: int = 20):
-    async def fetch_posts(feed_name, visited_feeds=set(), base_feed_name=None):
-        if feed_name in visited_feeds:
-            raise HTTPException(status_code=400, detail="Circular dependency detected")
-
-        visited_feeds.add(feed_name)
-
-        feed = await get_feed_by_name(db, feed_name)
-        if not feed:
-            raise HTTPException(status_code=404, detail="Feed not found")
-
-        feed_id = await get_feed_id_by_name(db, feed_name)
-        if not feed_id:
-            raise HTTPException(status_code=404, detail="Feed not found")
-
-        # If base_feed_name is not set, this is the base feed
-        if base_feed_name is None:
-            base_feed_name = feed_name
-
-        if "url" in feed:  # BASE_FEED
-            feed_collection = f"feed_{feed_id}"
-            posts_cursor = db[feed_collection].find().sort("published", -1).limit(limit)
-            posts = await posts_cursor.to_list(length=limit)
-            posts = [{**{key: value for key, value in post.items() if key != "_id"}, "feed": base_feed_name} for post in posts]
-            return posts
-        else:  # DERIVED_FEED
-            posts = []
-            for derivation in feed["derivation"]:
-                parent_posts = await fetch_posts(derivation["parrent_name"], visited_feeds, base_feed_name)
-
-                filters = derivation.get("filter", [])
-                if filters:
-                    filtered_posts = [
-                        post for post in parent_posts
-                        if any(f.lower() in (post.get("title", "").lower() + post.get("description", "").lower()) for f in filters)
-                    ]
-                else:
-                    filtered_posts = parent_posts
-
-                posts.extend(filtered_posts)
-
-            posts.sort(key=lambda x: x["published"], reverse=True)
-            posts = posts[:limit]
-            return posts
-
-    all_posts = await fetch_posts(feed_name)
+    all_posts = await fetch_processed_posts(feed_name, db, limit)
     return all_posts
 
 @app.post("/update-feeds/")
