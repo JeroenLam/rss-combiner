@@ -44,7 +44,7 @@ def fetch_feed_posts(feed_url):
         for entry in feed.entries
     ]
 
-async def fetch_processed_posts(feed_name: str, db, limit: int = 20, visited_feeds=None, base_feed_name=None):
+async def fetch_processed_posts(feed_name: str, db, limit: int = 20, visited_feeds=None):
     if visited_feeds is None:
         visited_feeds = set()
 
@@ -62,8 +62,6 @@ async def fetch_processed_posts(feed_name: str, db, limit: int = 20, visited_fee
         raise HTTPException(status_code=404, detail="Feed not found")
 
     # If base_feed_name is not set, this is the base feed
-    if base_feed_name is None:
-        base_feed_name = feed_name
 
     if "url" in feed:  # BASE_FEED
         feed_collection = f"feed_{feed_id}"
@@ -71,7 +69,7 @@ async def fetch_processed_posts(feed_name: str, db, limit: int = 20, visited_fee
         posts = await posts_cursor.to_list(length=limit)
         for post in posts:
             post["_id"] = str(post["_id"])  # Ensure '_id' is string
-            post["feed"] = base_feed_name
+            post["feed"] = feed["name"]
             if post.get("published") and not post["published"].tzinfo:
                 post["published"] = post["published"].replace(tzinfo=pytz.UTC)  # Make datetime UTC aware
 
@@ -79,7 +77,7 @@ async def fetch_processed_posts(feed_name: str, db, limit: int = 20, visited_fee
     else:  # DERIVED_FEED
         posts = []
         for derivation in feed["derivation"]:
-            parent_posts = await fetch_processed_posts(derivation["parrent_name"], db, limit, visited_feeds, base_feed_name)
+            parent_posts = await fetch_processed_posts(derivation["parrent_name"], db, limit, visited_feeds)
 
             filters = derivation.get("filter", [])
             if filters:
