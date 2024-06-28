@@ -32,11 +32,12 @@ def fetch_feed_posts(feed_url):
     feed = feedparser.parse(feed_url)
     return [
         {
-            "title": entry.title,
-            "link": entry.link,
-            "published": datetime(*entry.published_parsed[:6]),
-            "description": entry.description,
-            "guid": entry.id
+            "title": getattr(entry, 'title', None),
+            "link": getattr(entry, 'link', None),
+            "published": datetime(*entry.published_parsed[:6]) if 'published_parsed' in entry else None,
+            "description": getattr(entry, 'description', None),
+            "guid": getattr(entry, 'id', None),
+            "author": getattr(entry, 'author', None)
         }
         for entry in feed.entries
     ]
