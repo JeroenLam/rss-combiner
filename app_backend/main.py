@@ -5,6 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from enum import Enum
 import os
 from utils import *
+from bson import json_util
 
 app = FastAPI()
 
@@ -31,7 +32,7 @@ class FeedSettings(BaseModel):
 # Derivation details for derived feeds
 class DerivationDetail(BaseModel):
     parrent_name: str = Field(...)
-    filter: Optional[str]
+    filter: Optional[List[str]]
 
 
 # Feed model for Base Feeds
@@ -156,21 +157,6 @@ async def delete_feed(feed_name: str):
 
     return f"Feed deleted: {feed_name}"
 
-
-@app.get("/feeds/{feed_name}/filters/")
-async def get_filters(feed_name: str):
-    # Check if the feed exists
-    feed = await get_feed_by_name(db, feed_name)
-    if not feed:
-        raise HTTPException(status_code=404, detail="Feed not found")
-    
-    # Ensure the feed is a DERIVED_FEED
-    if "url" in feed:
-        raise HTTPException(status_code=400, detail="BASE_FEED does not have filters")
-    
-    # Return the filters
-    return {"filters": feed.get("filters", [])}
-
 @app.post("/feeds/{feed_name}/filters/")
 async def update_filters(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
@@ -204,27 +190,111 @@ async def delete_filters(feed_name: str, derivation_details: Optional[List[Deriv
         raise HTTPException(status_code=400, detail="BASE_FEED cannot have filters")
 
     if derivation_details:
-        # Remove the specified filters from the derivation details
+        # Remove only the specified filters from the derivation details
         for detail in feed["derivation"]:
             for del_detail in derivation_details:
-                if detail.get("parrent_name") == del_detail.parrent_name:
-                    detail["filter"] = None
+                if detail.get("parrent_name") == del_detail.parrent_name and detail.get("filter"):
+                    detail["filter"] = [f for f in detail["filter"] if f not in del_detail.filter]
     else:
         # Remove all filters if no specific filters are provided
         for detail in feed["derivation"]:
-            detail["filter"] = None
+            detail["filter"] = []
 
     # Update the feed in the database
     await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Filters deleted for feed: {feed_name}"}
+
+@app.post("/feeds/{feed_name}/parent/")
+async def add_parent(feed_name: str, derivation_details: List[DerivationDetail]):
+    # Check if the feed exists
+    feed = await get_feed_by_name(db, feed_name)
+    if not feed:
+        raise HTTPException(status_code=404, detail="Feed not found")
+
+    # Ensure the feed is a DERIVED_FEED
+    if "url" in feed:
+        raise HTTPException(status_code=400, detail="BASE_FEED cannot have derivation details")
+
+    # Add new derivation details
+    for new_detail in derivation_details:
+        if not any(detail["parrent_name"] == new_detail.parrent_name for detail in feed["derivation"]):
+            feed["derivation"].append(new_detail.dict())
+
+    # Update the feed in the database
+    await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
+    return {"message": f"Derivation details added for feed: {feed_name}"}
+
+@app.delete("/feeds/{feed_name}/parent/")
+async def remove_parent(feed_name: str, derivation_details: List[DerivationDetail]):
+    # Check if the feed exists
+    feed = await get_feed_by_name(db, feed_name)
+    if not feed:
+        raise HTTPException(status_code=404, detail="Feed not found")
+
+    # Ensure the feed is a DERIVED_FEED
+    if "url" in feed:
+        raise HTTPException(status_code=400, detail="BASE_FEED cannot have derivation details")
+
+    # Remove specified derivation details
+    feed["derivation"] = [detail for detail in feed["derivation"] 
+                          if not any(detail["parrent_name"] == del_detail.parrent_name for del_detail in derivation_details)]
+
+    # Update the feed in the database
+    await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
+    return {"message": f"Derivation details removed for feed: {feed_name}"}
 
 @app.get("/feeds/{feed_name}/rss/")
 def unimplemented_endpoint(feed_name: str):
     raise HTTPException(status_code=501,detail="This endpoint is not implemented yet.")
 
 @app.get("/feeds/{feed_name}/json/")
-def unimplemented_endpoint(feed_name: str):
-    raise HTTPException(status_code=501,detail="This endpoint is not implemented yet.")
+async def get_feed_json(feed_name: str, limit: int = 20):
+    async def fetch_posts(feed_name, visited_feeds=set(), base_feed_name=None):
+        if feed_name in visited_feeds:
+            raise HTTPException(status_code=400, detail="Circular dependency detected")
+
+        visited_feeds.add(feed_name)
+
+        feed = await get_feed_by_name(db, feed_name)
+        if not feed:
+            raise HTTPException(status_code=404, detail="Feed not found")
+
+        feed_id = await get_feed_id_by_name(db, feed_name)
+        if not feed_id:
+            raise HTTPException(status_code=404, detail="Feed not found")
+
+        # If base_feed_name is not set, this is the base feed
+        if base_feed_name is None:
+            base_feed_name = feed_name
+
+        if "url" in feed:  # BASE_FEED
+            feed_collection = f"feed_{feed_id}"
+            posts_cursor = db[feed_collection].find().sort("published", -1).limit(limit)
+            posts = await posts_cursor.to_list(length=limit)
+            posts = [{**{key: value for key, value in post.items() if key != "_id"}, "feed": base_feed_name} for post in posts]
+            return posts
+        else:  # DERIVED_FEED
+            posts = []
+            for derivation in feed["derivation"]:
+                parent_posts = await fetch_posts(derivation["parrent_name"], visited_feeds, base_feed_name)
+
+                filters = derivation.get("filter", [])
+                if filters:
+                    filtered_posts = [
+                        post for post in parent_posts
+                        if any(f.lower() in (post.get("title", "").lower() + post.get("description", "").lower()) for f in filters)
+                    ]
+                else:
+                    filtered_posts = parent_posts
+
+                posts.extend(filtered_posts)
+
+            posts.sort(key=lambda x: x["published"], reverse=True)
+            posts = posts[:limit]
+            return posts
+
+    all_posts = await fetch_posts(feed_name)
+    return all_posts
 
 @app.post("/update-feeds/")
 async def scan_for_new_posts(background_tasks: BackgroundTasks):
