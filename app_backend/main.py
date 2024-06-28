@@ -1,9 +1,8 @@
-from typing import Optional
+from typing import Optional, List, Union
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field, root_validator, ValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
 from enum import Enum
-from bson import ObjectId
 import os
 from utils import *
 
@@ -18,49 +17,68 @@ db = client.rss_feed_db
 
 # Enum to indicate the type of feed
 class FeedType(Enum):
-    BASE_FEED = 0
-    DERIVED_FEED = 1
+    BASE_FEED = "base"
+    DERIVED_FEED = "derived"
+
+# Settings dataclass for the feeds
+class FeedSettings(BaseModel):
+    update_frequency: str
+    use_description: bool
+    scrape_content: bool
+    create_summary: bool
 
 
-# Filter object
-class Filters(BaseModel):
-    filters: Optional[list[str]] = Field(None)
+# Derivation details for derived feeds
+class DerivationDetail(BaseModel):
+    parrent_name: str = Field(...)
+    filter: Optional[str]
 
 
-# Feed object
+# Feed model for Base Feeds
 class FeedRequest(BaseModel):
-    name: str 
-    url: Optional[str] = Field(None)
-    parent_feeds: Optional[list[str]] = Field(None)
+    short_name: str
+    name: str
+    icon: str
+    url: Optional[str] = None
+    settings: Optional[FeedSettings] = None
+    derivation: Optional[List[DerivationDetail]] = None
 
     @root_validator(pre=True)
-    def check_either_id_or_first_last(cls, values):
+    def check_feed_type(cls, values):
         url = values.get('url')
-        parent_feeds = values.get('parent_feeds')
+        derivation = values.get('derivation')
              
         if url is not None:
             cls.feed_type = FeedType.BASE_FEED
-            if parent_feeds is not None :
-                raise ValueError('Provide either "url" or both a list of feed names, not both.')
+            if derivation is not None:
+                raise ValueError('Provide either "url" or "derivation", not both.')
+            
+            if not values.get('settings'):
+                raise ValueError('Base feed must include "settings".')
         else:
             cls.feed_type = FeedType.DERIVED_FEED
-            cls.parent_ids = []
-            if parent_feeds is None:
-                raise ValueError('Provide either "url" or both a list of feed names.')
-        
+            if derivation is None:
+                raise ValueError('Provide "derivation" for derived feed.')
+            if values.get('settings'):
+                raise ValueError('Derived feeds may not include "settings".')        
         
         return values
     
     def to_db(self):
         if self.feed_type == FeedType.BASE_FEED:
             return {
+                "short_name": self.short_name,
                 "name": self.name,
-                "url": self.url
+                "icon": self.icon,
+                "url": self.url,
+                "settings": self.settings.dict(),
             }
         else:
             return {
+                "short_name": self.short_name,
                 "name": self.name,
-                "parent_ids": self.parent_ids,
+                "icon": self.icon,
+                "derivation": [der.dict(by_alias=True) for der in self.derivation],
             }
 
 
@@ -82,11 +100,10 @@ async def create_feed(feed: FeedRequest):
         # if not validate_rss_feed(feed.url):
         #     raise HTTPException(status_code=400, detail="Please provide a valid rss url.")
     else:
-        for feed_name in feed.parent_feeds:
-            parent_id = await get_feed_id_by_name(db, feed_name)
+        for deriv in feed.derivation:
+            parent_id = await get_feed_id_by_name(db, deriv.parrent_name)
             if not parent_id:
-                raise HTTPException(status_code=400, detail=f"Parent feed does not exists: {feed_name}")
-            feed.parent_ids.append(parent_id)
+                raise HTTPException(status_code=400, detail=f"Parent feed does not exist: {deriv.parrent_name}")
     
     await insert_feed(db, feed.to_db())
     return f"Feed added: {feed.name}"
@@ -100,15 +117,22 @@ async def get_feed(feed_name: str):
     
     if "url" in feed:
         response = {
+            "short_name": feed.get("short_name"),
             "name": feed["name"],
-            "url": feed["url"]
+            "icon": feed.get("icon"),
+            "url": feed["url"],
+            "settings": feed.get("settings"),
         }
     else:
-        parent_feeds = [await get_feed_by_name(db, parent_id) for parent_id in feed["parent_ids"]]
-        parent_feeds_names = [parent["name"] for parent in parent_feeds]
+        derivation_details = [{
+            "from": deriv["parrent_name"],
+            "filter": deriv.get("filter")
+        } for deriv in feed["derivation"]]
         response = {
+            "short_name": feed["short_name"],
             "name": feed["name"],
-            "parent_feeds": parent_feeds_names
+            "icon": feed["icon"],
+            "derivation": derivation_details
         }
     
     return response
@@ -120,11 +144,16 @@ async def delete_feed(feed_name: str):
     if not feed_id:
         raise HTTPException(status_code=400, detail=f"Feed does not exist: {feed_name}")
     
-    child_feed = await db.feeds.find_one({"parent_ids": feed_id})
+    child_feed = await db.feeds.find_one({"derivation.parrent_name": feed_id})
     if child_feed:
         raise HTTPException(status_code=400, detail=f"Feed '{feed_name}' is a parent to other feeds and cannot be deleted.")
     
     await db.feeds.delete_one({"_id": feed_id})
+
+    # Delete the corresponding post collection
+    feed_collection = f"feed_{feed_id}"
+    await db.drop_collection(feed_collection)
+
     return f"Feed deleted: {feed_name}"
 
 
@@ -142,50 +171,51 @@ async def get_filters(feed_name: str):
     # Return the filters
     return {"filters": feed.get("filters", [])}
 
-
 @app.post("/feeds/{feed_name}/filters/")
-async def update_filters(feed_name: str, filters: Filters):
+async def update_filters(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
-    feed_id = await feed_name_exists(db, feed_name)
-    if not feed_id:
+    feed = await get_feed_by_name(db, feed_name)
+    if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
     # Ensure the feed is a DERIVED_FEED
-    feed = await db.feeds.find_one({"_id": feed_id})
     if "url" in feed:
         raise HTTPException(status_code=400, detail="BASE_FEED cannot have filters")
 
-    # Append only the filters which are not already in the list of filters
-    current_filters = feed.get("filters", [])
-    new_filters = [f for f in filters.filters if f not in current_filters] if filters.filters else []
-    updated_filters = current_filters + new_filters
+    # Update the derivation details with new filters
+    for detail in feed["derivation"]:
+        for new_detail in derivation_details:
+            if detail["parrent_name"] == new_detail.parrent_name:
+                detail["filter"] = new_detail.filter
 
-    # Update the filters in the database
-    await db.feeds.update_one({"_id": feed_id}, {"$set": {"filters": updated_filters}})
+    # Update the feed in the database
+    await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Filters updated for feed: {feed_name}"}
 
-
 @app.delete("/feeds/{feed_name}/filters/")
-async def delete_filters(feed_name: str, filters: Optional[Filters] = None):
+async def delete_filters(feed_name: str, derivation_details: Optional[List[DerivationDetail]] = None):
     # Check if the feed exists
-    feed_id = await feed_name_exists(db, feed_name)
-    if not feed_id:
+    feed = await get_feed_by_name(db, feed_name)
+    if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
     # Ensure the feed is a DERIVED_FEED
-    feed = await db.feeds.find_one({"_id": feed_id})
     if "url" in feed:
         raise HTTPException(status_code=400, detail="BASE_FEED cannot have filters")
 
-    if filters and filters.filters:
-        # Remove the specified filters from the existing list of filters
-        current_filters = feed.get("filters", [])
-        updated_filters = [f for f in current_filters if f not in filters.filters]
-        await db.feeds.update_one({"_id": feed_id}, {"$set": {"filters": updated_filters}})
+    if derivation_details:
+        # Remove the specified filters from the derivation details
+        for detail in feed["derivation"]:
+            for del_detail in derivation_details:
+                if detail.get("parrent_name") == del_detail.parrent_name:
+                    detail["filter"] = None
     else:
-        # Delete all filters if no specific filters are provided
-        await db.feeds.update_one({"_id": feed_id}, {"$unset": {"filters": ""}})
+        # Remove all filters if no specific filters are provided
+        for detail in feed["derivation"]:
+            detail["filter"] = None
 
+    # Update the feed in the database
+    await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Filters deleted for feed: {feed_name}"}
 
 @app.get("/feeds/{feed_name}/rss/")
