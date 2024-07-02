@@ -7,7 +7,7 @@ Make sure you copy `ex.env` to `.env` and configure settings. Then run:
 docker compose --env-file .env up --build -d
 ```
 
-## Example data and usage of api
+## Example data and usage of api (old)
 If you want the database to be filled with some example data, run:
 ```bash
 ./fill_test_db.sh
@@ -16,4 +16,7 @@ This will add the NOS tech news feed and the nu.nl tech newsfeed to the database
 
 
 ## Database management and api documentation
-Once the application is running you can find the `Mongo Express` interface at port `<your-ip>:8081` and the `api` documentation at `<your-ip>:8000/docs`.
+Once the application is running you can find the following documentation and management interfaces:
+- `Mongo Express` at `<your-ip>:8081` 
+- `Kibana` at `<your-ip>:5601` 
+- `Backend` documentation at `<your-ip>:8000/docs`
