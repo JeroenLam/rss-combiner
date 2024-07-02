@@ -8,15 +8,29 @@ import os
 from feedgen.feed import FeedGenerator
 from utils import *
 from auth import *
+from elasticsearch import AsyncElasticsearch
+from elasticsearch.exceptions import ElasticsearchException
+import asyncio
 
-
+# Initialise FastAPI
 app = FastAPI()
 
+# Initialise MongoDB client
 mongo_url = os.environ["MONGO_URL"]
 mongo_user = os.environ["MONGO_USER"]
 mongo_pass = os.environ["MONGO_PASS"]
 client = AsyncIOMotorClient(f"mongodb://{mongo_user}:{mongo_pass}@{mongo_url}:27017/")
 db = client.rss_feed_db
+
+# Initialize Elasticsearch client
+es = AsyncElasticsearch(
+    hosts=["http://localhost:9200"],
+    use_ssl=False,
+    verify_certs=False,
+    sniff_on_start=True,
+    sniff_on_connection_fail=True,
+    sniffer_timeout=60
+)
 
 
 # Enum to indicate the type of feed
