@@ -88,7 +88,7 @@ class FeedRequest(BaseModel):
 
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    user = await authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -100,6 +100,23 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/users/", response_model=UserCreate)
+async def create_user(user: UserCreate):
+    user_in_db = await users_collection.find_one({"username": user.username})
+    if user_in_db:
+        raise HTTPException(
+            status_code=400,
+            detail="Username already registered",
+        )
+    hashed_password = get_password_hash(user.password)
+    user_dict = user.dict()
+    user_dict["hashed_password"] = hashed_password
+    del user_dict["password"]
+    await users_collection.insert_one(user_dict)
+    return user
+
 
 @app.get("/feeds/", dependencies=[Depends(get_current_active_user)])
 async def get_feeds_list():
