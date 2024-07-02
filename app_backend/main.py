@@ -7,7 +7,8 @@ from enum import Enum
 import os
 from feedgen.feed import FeedGenerator
 from utils import *
-from bson import json_util
+from auth import *
+
 
 app = FastAPI()
 
@@ -85,7 +86,22 @@ class FeedRequest(BaseModel):
             }
 
 
-@app.get("/feeds/")
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/feeds/", dependencies=[Depends(get_current_active_user)])
 async def get_feeds_list():
     feedcursor = await db.feeds.find({}, {"_id": 0, "name": 1}).to_list(1000)
     response = [feed['name'] for feed in feedcursor]
@@ -93,7 +109,7 @@ async def get_feeds_list():
     return response
 
 
-@app.post("/feeds/", status_code=status.HTTP_201_CREATED)
+@app.post("/feeds/", status_code=status.HTTP_201_CREATED, dependencies=[Depends(get_current_active_user)])
 async def create_feed(feed: FeedRequest):
     if await feed_name_exists(db, feed.name):
         raise HTTPException(status_code=409, detail="Feed name already exists.")
@@ -112,7 +128,7 @@ async def create_feed(feed: FeedRequest):
     return f"Feed added: {feed.name}"
 
 
-@app.get("/feeds/{feed_name}")
+@app.get("/feeds/{feed_name}", dependencies=[Depends(get_current_active_user)])
 async def get_feed(feed_name: str):
     feed = await get_feed_by_name(db, feed_name)
     if not feed:
@@ -141,7 +157,7 @@ async def get_feed(feed_name: str):
     return response
 
 
-@app.delete("/feeds/{feed_name}")
+@app.delete("/feeds/{feed_name}", dependencies=[Depends(get_current_active_user)])
 async def delete_feed(feed_name: str):
     feed_id = await get_feed_id_by_name(db, feed_name)
     if not feed_id:
@@ -159,7 +175,7 @@ async def delete_feed(feed_name: str):
 
     return f"Feed deleted: {feed_name}"
 
-@app.post("/feeds/{feed_name}/filters/")
+@app.post("/feeds/{feed_name}/filters/", dependencies=[Depends(get_current_active_user)])
 async def update_filters(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
     feed = await get_feed_by_name(db, feed_name)
@@ -180,7 +196,7 @@ async def update_filters(feed_name: str, derivation_details: List[DerivationDeta
     await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Filters updated for feed: {feed_name}"}
 
-@app.delete("/feeds/{feed_name}/filters/")
+@app.delete("/feeds/{feed_name}/filters/", dependencies=[Depends(get_current_active_user)])
 async def delete_filters(feed_name: str, derivation_details: Optional[List[DerivationDetail]] = None):
     # Check if the feed exists
     feed = await get_feed_by_name(db, feed_name)
@@ -206,7 +222,7 @@ async def delete_filters(feed_name: str, derivation_details: Optional[List[Deriv
     await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Filters deleted for feed: {feed_name}"}
 
-@app.post("/feeds/{feed_name}/parent/")
+@app.post("/feeds/{feed_name}/parent/", dependencies=[Depends(get_current_active_user)])
 async def add_parent(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
     feed = await get_feed_by_name(db, feed_name)
@@ -226,7 +242,7 @@ async def add_parent(feed_name: str, derivation_details: List[DerivationDetail])
     await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Derivation details added for feed: {feed_name}"}
 
-@app.delete("/feeds/{feed_name}/parent/")
+@app.delete("/feeds/{feed_name}/parent/", dependencies=[Depends(get_current_active_user)])
 async def remove_parent(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
     feed = await get_feed_by_name(db, feed_name)
@@ -245,7 +261,7 @@ async def remove_parent(feed_name: str, derivation_details: List[DerivationDetai
     await db.feeds.update_one({"_id": feed["_id"]}, {"$set": {"derivation": feed["derivation"]}})
     return {"message": f"Derivation details removed for feed: {feed_name}"}
 
-@app.get("/feeds/{feed_name}/rss/")
+@app.get("/feeds/{feed_name}/rss/", dependencies=[Depends(get_current_active_user)])
 async def get_feed_rss(feed_name: str, limit: int = 20):
     all_posts = await fetch_processed_posts(feed_name, db, limit)
 
@@ -267,12 +283,12 @@ async def get_feed_rss(feed_name: str, limit: int = 20):
     rss_feed = fg.rss_str(pretty=True)
     return Response(content=rss_feed, media_type="application/rss+xml")
 
-@app.get("/feeds/{feed_name}/json/")
+@app.get("/feeds/{feed_name}/json/", dependencies=[Depends(get_current_active_user)])
 async def get_feed_json(feed_name: str, limit: int = 20):
     all_posts = await fetch_processed_posts(feed_name, db, limit)
     return all_posts
 
-@app.post("/update-feeds/")
+@app.post("/update-feeds/", dependencies=[Depends(get_current_active_user)])
 async def scan_for_new_posts(background_tasks: BackgroundTasks):
     async def scan_task():
         base_feeds = await get_base_feeds(db)

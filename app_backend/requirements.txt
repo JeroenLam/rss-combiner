@@ -1,7 +1,9 @@
-fastapi
+fastapi[all]
 uvicorn
 motor
 pydantic
 feedparser
 feedgen
 pytz
+pyjwt[crypto]
+passlib[bcrypt]
