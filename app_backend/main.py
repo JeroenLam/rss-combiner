@@ -9,11 +9,8 @@ from feedgen.feed import FeedGenerator
 from utils import *
 from auth import *
 from elasticsearch import AsyncElasticsearch
-from elasticsearch.exceptions import ElasticsearchException
 import asyncio
-
-# Initialise FastAPI
-app = FastAPI()
+from contextlib import asynccontextmanager
 
 # Initialise MongoDB client
 mongo_url = os.environ["MONGO_URL"]
@@ -23,14 +20,16 @@ client = AsyncIOMotorClient(f"mongodb://{mongo_user}:{mongo_pass}@{mongo_url}:27
 db = client.rss_feed_db
 
 # Initialize Elasticsearch client
-es = AsyncElasticsearch(
-    hosts=["http://localhost:9200"],
-    use_ssl=False,
-    verify_certs=False,
-    sniff_on_start=True,
-    sniff_on_connection_fail=True,
-    sniffer_timeout=60
-)
+es_url = "http://elasticsearch:9200"
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global es
+    es = AsyncElasticsearch(es_url)
+    yield
+    await es.close()
+
+# Initialise FastAPI
+app = FastAPI(lifespan=lifespan)
 
 
 # Enum to indicate the type of feed
@@ -142,7 +141,7 @@ async def get_feeds_list():
 
 @app.post("/feeds/", status_code=status.HTTP_201_CREATED, dependencies=[Depends(get_current_active_user)])
 async def create_feed(feed: FeedRequest):
-    if await feed_name_exists(db, feed.name):
+    if await mongo_feed_name_exists(db, feed.name):
         raise HTTPException(status_code=409, detail="Feed name already exists.")
     
     if feed.feed_type == FeedType.BASE_FEED:
@@ -151,17 +150,17 @@ async def create_feed(feed: FeedRequest):
         #     raise HTTPException(status_code=400, detail="Please provide a valid rss url.")
     else:
         for deriv in feed.derivation:
-            parent_id = await get_feed_id_by_name(db, deriv.parrent_name)
+            parent_id = await mongo_get_feed_id_by_name(db, deriv.parrent_name)
             if not parent_id:
                 raise HTTPException(status_code=400, detail=f"Parent feed does not exist: {deriv.parrent_name}")
     
-    await insert_feed(db, feed.to_db())
+    await mongo_insert_feed(db, feed.to_db())
     return f"Feed added: {feed.name}"
 
 
 @app.get("/feeds/{feed_name}", dependencies=[Depends(get_current_active_user)])
 async def get_feed(feed_name: str):
-    feed = await get_feed_by_name(db, feed_name)
+    feed = await mongo_get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
     
@@ -190,7 +189,7 @@ async def get_feed(feed_name: str):
 
 @app.delete("/feeds/{feed_name}", dependencies=[Depends(get_current_active_user)])
 async def delete_feed(feed_name: str):
-    feed_id = await get_feed_id_by_name(db, feed_name)
+    feed_id = await mongo_get_feed_id_by_name(db, feed_name)
     if not feed_id:
         raise HTTPException(status_code=400, detail=f"Feed does not exist: {feed_name}")
     
@@ -209,7 +208,7 @@ async def delete_feed(feed_name: str):
 @app.post("/feeds/{feed_name}/filters/", dependencies=[Depends(get_current_active_user)])
 async def update_filters(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
-    feed = await get_feed_by_name(db, feed_name)
+    feed = await mongo_get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
@@ -230,7 +229,7 @@ async def update_filters(feed_name: str, derivation_details: List[DerivationDeta
 @app.delete("/feeds/{feed_name}/filters/", dependencies=[Depends(get_current_active_user)])
 async def delete_filters(feed_name: str, derivation_details: Optional[List[DerivationDetail]] = None):
     # Check if the feed exists
-    feed = await get_feed_by_name(db, feed_name)
+    feed = await mongo_get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
@@ -256,7 +255,7 @@ async def delete_filters(feed_name: str, derivation_details: Optional[List[Deriv
 @app.post("/feeds/{feed_name}/parent/", dependencies=[Depends(get_current_active_user)])
 async def add_parent(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
-    feed = await get_feed_by_name(db, feed_name)
+    feed = await mongo_get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
@@ -276,7 +275,7 @@ async def add_parent(feed_name: str, derivation_details: List[DerivationDetail])
 @app.delete("/feeds/{feed_name}/parent/", dependencies=[Depends(get_current_active_user)])
 async def remove_parent(feed_name: str, derivation_details: List[DerivationDetail]):
     # Check if the feed exists
-    feed = await get_feed_by_name(db, feed_name)
+    feed = await mongo_get_feed_by_name(db, feed_name)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
@@ -294,9 +293,8 @@ async def remove_parent(feed_name: str, derivation_details: List[DerivationDetai
 
 @app.get("/feeds/{feed_name}/rss/", dependencies=[Depends(get_current_active_user)])
 async def get_feed_rss(feed_name: str, limit: int = 20):
-    all_posts = await fetch_processed_posts(feed_name, db, limit)
+    all_posts = await fetch_processed_posts(feed_name, es, db, limit)
 
-    # Generate RSS feed using feedgen
     fg = FeedGenerator()
     fg.title(feed_name)
     fg.link(href=f"/feeds/{feed_name}/rss/")
@@ -316,16 +314,16 @@ async def get_feed_rss(feed_name: str, limit: int = 20):
 
 @app.get("/feeds/{feed_name}/json/", dependencies=[Depends(get_current_active_user)])
 async def get_feed_json(feed_name: str, limit: int = 20):
-    all_posts = await fetch_processed_posts(feed_name, db, limit)
+    all_posts = await fetch_processed_posts(feed_name, es, db, limit)
     return all_posts
 
 @app.post("/update-feeds/", dependencies=[Depends(get_current_active_user)])
 async def scan_for_new_posts(background_tasks: BackgroundTasks):
     async def scan_task():
-        base_feeds = await get_base_feeds(db)
+        base_feeds = await mongo_get_base_feeds(db)
         for feed in base_feeds:
-            feed_collection = f"feed_{feed['_id']}"
-            existing_guids = await get_existing_guids(db, feed_collection)
+            feed_index = f"rss_{feed['name']}"
+            existing_guids = await es_get_existing_guids(es, feed_index)
             new_posts = []
             
             posts = fetch_feed_posts(feed["url"])
@@ -334,7 +332,7 @@ async def scan_for_new_posts(background_tasks: BackgroundTasks):
                     new_posts.append(post)
             
             if new_posts:
-                await insert_new_posts(db, feed_collection, new_posts)
+                await es_insert_new_posts(es, feed_index, new_posts)
 
     background_tasks.add_task(scan_task)
     return {"message": "Scanning for new posts started in the background"}
