@@ -1,7 +1,23 @@
+#!/bin/bash
+
+# Credentials
+USERNAME="admin2"
+PASSWORD="admin"
+
+# Make the POST request to obtain the access token
+response=$(curl -s -X POST "http://localhost:8000/token" \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "grant_type=&username=$USERNAME&password=$PASSWORD&scope=&client_id=&client_secret=")
+
+# Extract the access token from the response
+access_token=$(echo $response | grep -oP '"access_token":"\K[^"]+')
+
 # Add NOS tech feed to the db
 curl -X 'POST' \
   'http://localhost:8000/feeds/' \
   -H 'accept: application/json' \
+  -H "Authorization: Bearer $access_token" \
   -H 'Content-Type: application/json' \
   -d '{
   "short_name": "nos_tech",
@@ -20,6 +36,7 @@ curl -X 'POST' \
 curl -X 'POST' \
   'http://localhost:8000/feeds/' \
   -H 'accept: application/json' \
+  -H "Authorization: Bearer $access_token" \
   -H 'Content-Type: application/json' \
   -d '{
   "short_name": "nu_tech",
@@ -38,6 +55,7 @@ curl -X 'POST' \
 curl -X 'POST' \
   'http://localhost:8000/feeds/' \
   -H 'accept: application/json' \
+  -H "Authorization: Bearer $access_token" \
   -H 'Content-Type: application/json' \
   -d '{
   "short_name": "tech_nl",
@@ -58,5 +76,6 @@ curl -X 'POST' \
 # Update the content in the database based on the feeds present in the database
 curl -X 'POST' \
   'http://localhost:8000/update-feeds/' \
+  -H "Authorization: Bearer $access_token" \
   -H 'accept: application/json' \
   -d ''

@@ -39,12 +39,28 @@ async def es_get_latest_post_timestamp(es, index):
         return None
 
 
-async def es_get_existing_guids(es, index):
+async def es_get_existing_rss_ids(es, feed_id, index="articles"):
     try:
-        result = await es.search(index=index, body={"_source": ["guid"], "size": 1000})
-        return {hit["_source"]["guid"] for hit in result["hits"]["hits"]}
+        query = {
+            "_source": ["id"],
+            "query": {
+                "term": {
+                    "feed_id": feed_id
+                }
+            },
+            "sort": [
+                {
+                    "published": {
+                        "order": "desc"
+                    }
+                }
+            ],
+            "size": 100
+        }
+        result = await es.search(index=index, body=query)
+        return {hit["_source"]["id"] for hit in result["hits"]["hits"]}
     except Exception as e:
-        print(f"Error getting existing GUIDs from index {index}: {e}")
+        print(f"Error getting existing IDs from index {index}: {e}")
         return set()
 
 
@@ -53,10 +69,10 @@ async def es_ensure_index_exists(es, index):
         await es.indices.create(index=index)
 
 
-async def es_insert_new_posts(es, index, posts):
+async def es_insert_new_posts(es, posts, index = "articles"):
     try:
         # Ensure the index exists before inserting
-        await es_ensure_index_exists(es, index)  
+        await es_ensure_index_exists(es, index)
 
         # Use the async_bulk helper function and ensure arguments are passed as keywords
         actions = [
@@ -68,23 +84,35 @@ async def es_insert_new_posts(es, index, posts):
         print(f"Error inserting new posts into index {index}: {e}")
 
 
-def fetch_feed_posts(feed_url):
+def fetch_feed_posts(feed_url: str):
     feed = feedparser.parse(feed_url)
-    return [
-        {
-            "title": getattr(entry, "title", None),
-            "link": getattr(entry, "link", None),
-            "published": (
+    response = []
+    for entry in feed.entries:
+        entry["published"] = (
                 datetime(*entry.published_parsed[:6])
                 if "published_parsed" in entry
                 else None
-            ),
-            "description": getattr(entry, "description", None),
-            "guid": getattr(entry, "id", None),
-            "author": getattr(entry, "author", None),
-        }
-        for entry in feed.entries
-    ]
+            )
+        del entry["published_parsed"]
+        response.append(entry)
+    
+    return response
+
+    # return [
+    #     {
+    #         "title": getattr(entry, "title", None),
+    #         "link": getattr(entry, "link", None),
+    #         "published": (
+    #             datetime(*entry.published_parsed[:6])
+    #             if "published_parsed" in entry
+    #             else None
+    #         ),
+    #         "description": getattr(entry, "description", None),
+    #         "guid": getattr(entry, "id", None),
+    #         "author": getattr(entry, "author", None),
+    #     }
+    #     for entry in feed.entries
+    # ]
 
 
 async def fetch_processed_posts(

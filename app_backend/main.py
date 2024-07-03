@@ -27,7 +27,7 @@ from feedgen.feed import FeedGenerator
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, root_validator
 from utils import (
-    es_get_existing_guids,
+    es_get_existing_rss_ids,
     es_insert_new_posts,
     fetch_feed_posts,
     fetch_processed_posts,
@@ -402,17 +402,21 @@ async def scan_for_new_posts(background_tasks: BackgroundTasks):
     async def scan_task():
         base_feeds = await mongo_get_base_feeds(db)
         for feed in base_feeds:
-            feed_index = f"rss_{feed['name']}"
-            existing_guids = await es_get_existing_guids(es, feed_index)
+            feed_id = f"{feed['_id']}"
+            existing_guids = await es_get_existing_rss_ids(es, feed_id)
             new_posts = []
 
             posts = fetch_feed_posts(feed["url"])
             for post in posts:
-                if post["guid"] not in existing_guids:
+                if post["id"] not in existing_guids:
                     new_posts.append(post)
 
+            # Add the feed id to each post
+            for post in new_posts:
+                post["feed_id"] = feed_id
+
             if new_posts:
-                await es_insert_new_posts(es, feed_index, new_posts)
+                await es_insert_new_posts(es, new_posts)
 
     background_tasks.add_task(scan_task)
     return {"message": "Scanning for new posts started in the background"}
