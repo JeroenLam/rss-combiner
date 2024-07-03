@@ -1,25 +1,32 @@
-import feedparser
 from datetime import datetime
-from fastapi import HTTPException
+
+import feedparser
 import pytz
-from elasticsearch.helpers import async_bulk
 from dateutil.parser import parse as parse_date
+from elasticsearch.helpers import async_bulk
+from fastapi import HTTPException
+
 
 async def mongo_get_feed_by_name(db, feed_name: str):
     return await db.feeds.find_one({"name": feed_name})
+
 
 async def mongo_get_feed_id_by_name(db, feed_name: str):
     feed = await db.feeds.find_one({"name": feed_name}, {"_id": 1})
     return feed["_id"] if feed else None
 
+
 async def mongo_feed_name_exists(db, feed_name: str) -> bool:
     return await mongo_get_feed_id_by_name(db, feed_name) is not None
+
 
 async def mongo_insert_feed(db, feed_data: dict):
     await db.feeds.insert_one(feed_data)
 
+
 async def mongo_get_base_feeds(db):
     return await db.feeds.find({"url": {"$exists": True}}).to_list(1000)
+
 
 async def es_get_latest_post_timestamp(es, index):
     try:
@@ -31,6 +38,7 @@ async def es_get_latest_post_timestamp(es, index):
         print(f"Error getting latest post timestamp from index {index}: {e}")
         return None
 
+
 async def es_get_existing_guids(es, index):
     try:
         result = await es.search(index=index, body={"_source": ["guid"], "size": 1000})
@@ -39,39 +47,49 @@ async def es_get_existing_guids(es, index):
         print(f"Error getting existing GUIDs from index {index}: {e}")
         return set()
 
+
 async def es_ensure_index_exists(es, index):
     if not await es.indices.exists(index=index):
         await es.indices.create(index=index)
 
+
 async def es_insert_new_posts(es, index, posts):
     try:
-        await es_ensure_index_exists(es, index)  # Ensure the index exists before inserting
+        # Ensure the index exists before inserting
+        await es_ensure_index_exists(es, index)  
 
         # Use the async_bulk helper function and ensure arguments are passed as keywords
         actions = [
-            {"_op_type": "index", "_index": index, "_source": post}
-            for post in posts
+            {"_op_type": "index", "_index": index, "_source": post} for post in posts
         ]
         # Note the use of named keywords rather than positional arguments
         await async_bulk(es, actions)
     except Exception as e:
         print(f"Error inserting new posts into index {index}: {e}")
 
+
 def fetch_feed_posts(feed_url):
     feed = feedparser.parse(feed_url)
     return [
         {
-            "title": getattr(entry, 'title', None),
-            "link": getattr(entry, 'link', None),
-            "published": datetime(*entry.published_parsed[:6]) if 'published_parsed' in entry else None,
-            "description": getattr(entry, 'description', None),
-            "guid": getattr(entry, 'id', None),
-            "author": getattr(entry, 'author', None)
+            "title": getattr(entry, "title", None),
+            "link": getattr(entry, "link", None),
+            "published": (
+                datetime(*entry.published_parsed[:6])
+                if "published_parsed" in entry
+                else None
+            ),
+            "description": getattr(entry, "description", None),
+            "guid": getattr(entry, "id", None),
+            "author": getattr(entry, "author", None),
         }
         for entry in feed.entries
     ]
 
-async def fetch_processed_posts(feed_name: str, es, db, limit: int = 20, visited_feeds=None):
+
+async def fetch_processed_posts(
+    feed_name: str, es, db, limit: int = 20, visited_feeds=None
+):
     if visited_feeds is None:
         visited_feeds = set()
 
@@ -93,20 +111,32 @@ async def fetch_processed_posts(feed_name: str, es, db, limit: int = 20, visited
                 post["feed"] = feed["name"]
                 if post.get("published"):
                     # Ensure 'published' is parsed as a datetime and timezone-aware
-                    post["published"] = parse_date(post["published"]).replace(tzinfo=pytz.UTC)
+                    post["published"] = parse_date(post["published"]).replace(
+                        tzinfo=pytz.UTC
+                    )
             return posts
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     else:  # DERIVED_FEED
         posts = []
         for derivation in feed["derivation"]:
-            parent_posts = await fetch_processed_posts(derivation["parrent_name"], es, db, limit, visited_feeds)
+            parent_posts = await fetch_processed_posts(
+                derivation["parrent_name"], es, db, limit, visited_feeds
+            )
 
             filters = derivation.get("filter", [])
             if filters:
                 filtered_posts = [
-                    post for post in parent_posts
-                    if any(f.lower() in (post.get("title", "").lower() + post.get("description", "").lower()) for f in filters)
+                    post
+                    for post in parent_posts
+                    if any(
+                        f.lower()
+                        in (
+                            post.get("title", "").lower()
+                            + post.get("description", "").lower()
+                        )
+                        for f in filters
+                    )
                 ]
             else:
                 filtered_posts = parent_posts
