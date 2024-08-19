@@ -1,4 +1,13 @@
 services:
+  frontend:
+    build:
+      context: ./app_frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8082:80"
+    environment:
+      VUE_APP_BACKEND_URL: "http://localhost:8000"
+
   backend:
     build: ./app_backend
     container_name: rss-backend
